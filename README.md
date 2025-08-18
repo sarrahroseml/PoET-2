@@ -13,6 +13,9 @@ effect prediction and controllable protein sequence generation.
 
    - To run a script using the Python environment, run
      `pixi run --no-lockfile-update python path/to/script.py`
+   - **NOTE**: The environment comes with a custom implementation of [FlashAttention](https://github.com/Dao-AILab/flash-attention)
+     that overrides the behavior of the `alibi_slopes` parameter. Therefore, other models
+     that make use of FlashAttention's `alibi_slopes` parameter may not work properly.
 
 1. Run `make download_model` to download the model weights (~400MB). The model weights
    will be located at `data/gitignore/models/poet-2.ckpt`. Please note the
@@ -100,29 +103,34 @@ For commercial use of the model weights, please reach out to us at contact@ne47.
 
 ## Third-Party Components
 
-This repository includes code from third-party projects:
+This repository includes artifacts from third-party projects:
 
 - Code in `src/poet_2/models/modules/norm.py` is adapted from [Mamba](https://github.com/state-spaces/mamba)
-  and is licensed under the Apache License, Version 2.0.
+  and originally licensed under the Apache License, Version 2.0.
 - Code in `src/poet_2/models/modules/glu.py` for the class `GLU` is adapted from
-  [x-formers](https://github.com/lucidrains/x-transformers) and licensed under the MIT
-  License.
+  [x-formers](https://github.com/lucidrains/x-transformers) and originally licensed under
+  the MIT License.
 - Code in `src/poet_2/models/poet_2.py` (specifically the `decode` function) is adapted
-  from [FlashAttention](https://github.com/Dao-AILab/flash-attention) and licensed under
-  the BSD 3-Clause License.
+  from [FlashAttention](https://github.com/Dao-AILab/flash-attention) and originally
+  licensed under the BSD 3-Clause License.
 - Code in `src/poet_2/models/modules/packed_sequence.py` (specifically `unpad_input` and
   `pad_input`) is adapted from [FlashAttention](https://github.com/Dao-AILab/flash-attention)
-  and licensed under the BSD 3-Clause License.
+  and originally licensed under the BSD 3-Clause License.
 - Code in `src/poet_2/models/modules/attention_flash_fused_bias.py` is adapted from
-  [TurboT5](https://github.com/Knowledgator/TurboT5) and is licensed under the Apache
-  License, Version 2.0.
+  [TurboT5](https://github.com/Knowledgator/TurboT5) and originally licensed under the
+  Apache License, Version 2.0.
+- Some code in this repository depends on a custom implementation of [FlashAttention](https://github.com/Dao-AILab/flash-attention);
+  FlashAttention is originally licensed under the BSD 3-Clause License. This custom
+  implementation overrides the default behavior of the `alibi_slopes` parameter of the
+  attention function.
 
 Copies of the applicable third-party licenses are available in the
 `third_party_licenses/` directory.
 
-Portions of the above files that the original licenses require to remain under those
-licenses continue to be governed by them; everything else in these files, and in the
-rest of the repository, is covered by this repository’s license(s).
+Portions of the aforementioned artifacts that the original licenses require to remain
+under those licenses continue to be governed by them; all other poritions of the
+aforementioned artifacts, and the rest of the repository, is covered by this
+repository’s license(s).
 
 ## Citation
 
