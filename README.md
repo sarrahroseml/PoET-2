@@ -6,7 +6,7 @@ effect prediction and controllable protein sequence generation.
 
 ## Environment Setup
 
-1. Be on a machine with a NVIDIA GPU.
+1. Be on a Linux machine with a NVIDIA GPU.
 1. Install [pixi](https://pixi.sh/dev/installation/), a package management tool.
 1. Install the Python environment by running `pixi install` at the root of this
    repository.
