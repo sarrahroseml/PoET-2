@@ -1,6 +1,6 @@
 from collections.abc import Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TypedDict
 from typing_extensions import Self
@@ -53,56 +53,40 @@ def load_model(
     return model
 
 
-class Protein:
-    def __init__(
-        self,
-        sequence: bytes,
-        atomx: npt.NDArray[np.float32] | None = None,
-        plddt: npt.NDArray[np.float32] | None = None,
-    ):
-        if atomx is not None:
-            assert len(atomx) == len(sequence)
-        if plddt is not None:
-            assert len(plddt) == len(sequence)
-        self.length = len(sequence)
-        self.sequence = sequence
-        if atomx is not None:
-            self.atomx = atomx
-        else:
-            self.atomx = np.full((self.length, 3, 3), np.nan, dtype=np.float32)
-        if plddt is not None:
-            self.plddt = plddt
-        else:
-            self.plddt = np.full((self.length,), np.nan, dtype=np.float32)
-
-    def __len__(self):
-        return self.length
-
-    def enforce(self) -> Self:
-        # assuming the input is either a pdb or afdb structure
-        # in which case, can enforce based on atomx, and then based on plddt
-        # i.e. don't need to consider enforcing both at the same time
-        # enforce constraints for pdb structures
-        is_nan_any = np.isnan(self.atomx).reshape(len(self.atomx), -1).any(-1)
-        self.plddt[is_nan_any] = np.nan
-        self.atomx[is_nan_any] = np.nan
-        # enforce constraints for afdb structures
-        self.mask_by_plddt()
-        return self
-
-    def mask_by_plddt(self, plddt_threshold: float = 70) -> Self:
-        self.atomx[self.plddt < plddt_threshold] = np.nan
-        return self
-
-
 # SEQUENCE ENCODING STUFF
 
 
 @dataclass
 class NamedInput:
     sequence: bytes | str
-    plddt: npt.NDArray[np.float32] | None = None  # Shape: (L,)
-    atomx: npt.NDArray[np.float32] | None = None  # Shape: (L, 3, 3) Atom Order: N-Ca-C
+    plddt: npt.NDArray[np.float32] = field(init=False)  # Shape: (L,)
+    atomx: npt.NDArray[np.float32] = field(
+        init=False
+    )  # Shape: (L, 3, 3) Atom Order: N-Ca-C
+
+    def __init__(
+        self,
+        sequence: bytes | str,
+        plddt: npt.NDArray[np.float32] | None = None,
+        atomx: npt.NDArray[np.float32] | None = None,
+    ) -> None:
+        if plddt is not None:
+            assert len(plddt) == len(sequence)
+        if atomx is not None:
+            assert len(atomx) == len(sequence)
+        self.length = len(sequence)
+        self.sequence = sequence
+        if plddt is not None:
+            self.plddt = plddt
+        else:
+            self.plddt = np.full((self.length,), np.nan, dtype=np.float32)
+        if atomx is not None:
+            self.atomx = atomx
+        else:
+            self.atomx = np.full((self.length, 3, 3), np.nan, dtype=np.float32)
+
+    def __len__(self) -> int:
+        return self.length
 
     def enforce(self) -> Self:
         # assuming the input is either a pdb or afdb structure
@@ -302,6 +286,48 @@ def tokenize_seq_of_seqs(
         "atomxs": atomxs,
         "atombs": atombs,
     }
+
+
+class QueryData(TypedDict):
+    ref_idxs: torch.Tensor
+    known: torch.Tensor
+
+
+def encode_query_data(
+    encoder_batch: TokenizedData,
+    decoder_batch: TokenizedData,
+    query_idxs_batch: Sequence[Sequence[int | None]],
+    alphabet: Uniprot21 = Alphabet(),
+) -> QueryData:
+    ref_idxs = torch.full_like(decoder_batch["seqs"], -100, dtype=torch.long)
+    known = torch.full_like(decoder_batch["seqs"], False, dtype=torch.bool)
+    for batch_idx, (x_seqs, x_seqlens, y_seqlens, query_idxs) in enumerate(
+        zip(
+            encoder_batch["seqs"],
+            encoder_batch["segment_sizes"],
+            decoder_batch["segment_sizes"],
+            query_idxs_batch,
+            strict=True,
+        )
+    ):
+        x_cu_seqlens = F.pad(x_seqlens[x_seqlens > 0].cumsum(dim=0), (1, 0)).tolist()
+        y_cu_seqlens = F.pad(y_seqlens[y_seqlens > 0].cumsum(dim=0), (1, 0)).tolist()
+        for idx, query_idx in enumerate(query_idxs):
+            if query_idx is None:
+                continue
+            ref_idxs[batch_idx, y_cu_seqlens[idx] : y_cu_seqlens[idx + 1]] = (
+                torch.arange(
+                    x_cu_seqlens[query_idx],
+                    x_cu_seqlens[query_idx + 1],
+                    dtype=torch.long,
+                    device=ref_idxs.device,
+                )
+            )
+            known[batch_idx, y_cu_seqlens[idx] : y_cu_seqlens[idx + 1]] = (
+                x_seqs[x_cu_seqlens[query_idx] : x_cu_seqlens[query_idx + 1]]
+                != alphabet.mask_token
+            )
+    return {"ref_idxs": ref_idxs, "known": known}
 
 
 # STRUCTURE ENCODING STUFF

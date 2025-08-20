@@ -578,8 +578,8 @@ class PoET2(nn.Module):
             logits, _ = pad_input(
                 hidden_states=head.forward(xs_h.x),
                 indices=xs_indices,
-                batch=xs_h.cu_seqlens.numel() - 1,
-                seqlen=xs_h.max_s,
+                batch=xs.size(0),
+                seqlen=xs.size(1),
             )
         else:
             logits = None
