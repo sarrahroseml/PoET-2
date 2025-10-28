@@ -11,6 +11,8 @@ import argparse
 import random
 import sys
 import threading
+import atexit
+import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +30,41 @@ USER_AGENT = (
 _SESSION = requests.Session()
 _SESSION.headers.update({"User-Agent": USER_AGENT})
 _session_local = threading.local()
+_cache_lock = threading.Lock()
+CACHE_FILE = Path.home() / ".poet_uniref_cache.json"
+
+_uniref50_members_cache: Dict[str, List[str]] = {}
+_uniref90_members_cache: Dict[str, List[str]] = {}
+_cache_dirty = False
+
+if CACHE_FILE.exists():
+    try:
+        cache_data = json.loads(CACHE_FILE.read_text())
+        _uniref50_members_cache = {
+            key: list(value) for key, value in cache_data.get("uniref50_members", {}).items()
+        }
+        _uniref90_members_cache = {
+            key: list(value) for key, value in cache_data.get("uniref90_members", {}).items()
+        }
+    except (OSError, ValueError, TypeError):
+        _uniref50_members_cache = {}
+        _uniref90_members_cache = {}
+
+
+def _persist_cache() -> None:
+    if not _cache_dirty:
+        return
+    data = {
+        "uniref50_members": _uniref50_members_cache,
+        "uniref90_members": _uniref90_members_cache,
+    }
+    try:
+        CACHE_FILE.write_text(json.dumps(data))
+    except OSError:
+        pass
+
+
+atexit.register(_persist_cache)
 
 
 def _thread_session() -> requests.Session:
@@ -171,6 +208,11 @@ def infer_uniref50_id(uniref90_id: str) -> str:
 def collect_uniref90_members(uniref50_id: str) -> List[str]:
     """Return all UniRef90 cluster accessions within the UniRef50 cluster."""
     normalized_id = _normalize_cluster_id(uniref50_id, "UniRef50")
+    with _cache_lock:
+        cached = _uniref50_members_cache.get(normalized_id)
+    if cached is not None:
+        return list(cached)
+
     representative, members = collect_full_cluster(normalized_id)
 
     seen: Set[str] = set()
@@ -187,13 +229,24 @@ def collect_uniref90_members(uniref50_id: str) -> List[str]:
         raise UniRefError(
             f"UniRef50 cluster {normalized_id} lists no UniRef90 members."
         )
-
-    return sorted(seen)
+    result = sorted(seen)
+    with _cache_lock:
+        global _cache_dirty
+        _uniref50_members_cache[normalized_id] = list(result)
+        _cache_dirty = True
+    return result
 
 
 def collect_uniref90_cluster_info(uniref90_id: str) -> UniRef90ClusterInfo:
     """Gather UniRef100 sequence data for the provided UniRef90 cluster."""
     normalized_id = _normalize_cluster_id(uniref90_id, "UniRef90")
+    with _cache_lock:
+        cached = _uniref90_members_cache.get(normalized_id)
+    if cached is not None:
+        return UniRef90ClusterInfo(
+            cluster_id=normalized_id, uniref100_ids=list(cached)
+        )
+
     representative, members = collect_full_cluster(normalized_id)
 
     uniref100_candidates: Set[str] = set()
@@ -211,12 +264,14 @@ def collect_uniref90_cluster_info(uniref90_id: str) -> UniRef90ClusterInfo:
             f"UniRef90 cluster {normalized_id} contains no UniRef100 members."
         )
 
-    #uniref100_candidate = [
-        #build_uniref100_sequence(candidate) for candidate in sorted(uniref100_candidates)
-    #]
+    sorted_candidates = sorted(uniref100_candidates)
+    with _cache_lock:
+        global _cache_dirty
+        _uniref90_members_cache[normalized_id] = list(sorted_candidates)
+        _cache_dirty = True
 
     return UniRef90ClusterInfo(
-        cluster_id=normalized_id, uniref100_ids=sorted(uniref100_candidates)
+        cluster_id=normalized_id, uniref100_ids=sorted_candidates
     )
 
 
