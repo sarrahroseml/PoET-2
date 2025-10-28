@@ -10,10 +10,10 @@ from __future__ import annotations
 import argparse
 import random
 import sys
-import textwrap
-from pathlib import Path
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from functools import lru_cache
+from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 from urllib.parse import urljoin
 
@@ -27,33 +27,31 @@ USER_AGENT = (
 
 _SESSION = requests.Session()
 _SESSION.headers.update({"User-Agent": USER_AGENT})
+_session_local = threading.local()
+
+
+def _thread_session() -> requests.Session:
+    session = getattr(_session_local, "session", None)
+    if session is None:
+        session = requests.Session()
+        session.headers.update({"User-Agent": USER_AGENT})
+        _session_local.session = session
+    return session
 
 
 class UniRefError(RuntimeError):
     """Custom error raised for UniRef lookup failures."""
 
 
-@dataclass(frozen=True)
-class UniRef100Sequence:
-    """Container for UniRef100 sequence data."""
-
-    cluster_id: str
-    sequence: str
-    length: Optional[int]
-    accessions: Sequence[str]
-    cluster_member_count: int
-
-
 @dataclass
 class UniRef90ClusterInfo:
     """Aggregated data for a UniRef90 cluster."""
-
     cluster_id: str
-    uniref100_sequences: List[UniRef100Sequence]
+    uniref100_ids: List[str]
 
     @property
     def size(self) -> int:
-        return len(self.uniref100_sequences)
+        return len(self.uniref100_ids)
 
 
 @dataclass(frozen=True)
@@ -63,16 +61,13 @@ class SamplingRecord:
     uniref90_id: str
     uniref90_size: int
     uniref100_id: str
-    sequence: str
-    length: Optional[int]
-    uniref100_cluster_size: int
     probability: float
 
 
 def _request_json(url: str, params: Optional[Dict[str, str]] = None) -> Dict:
     """Perform a GET request and return the JSON payload."""
     try:
-        response = _SESSION.get(url, params=params, timeout=REQUEST_TIMEOUT)
+        response = _thread_session().get(url, params=params, timeout=REQUEST_TIMEOUT)
     except requests.RequestException as exc:
         raise UniRefError(f"Network error while querying {url}: {exc}") from exc
 
@@ -196,51 +191,6 @@ def collect_uniref90_members(uniref50_id: str) -> List[str]:
     return sorted(seen)
 
 
-@lru_cache(maxsize=None)
-def fetch_uniref100_cluster(uniref100_id: str) -> Tuple[Dict, List[Dict]]:
-    """Fetch a UniRef100 cluster with cached results."""
-    normalized_id = _normalize_cluster_id(uniref100_id, "UniRef100")
-    return collect_full_cluster(normalized_id, include_sequences=True)
-
-
-def _sequence_from_entry(entry: Dict) -> Tuple[Optional[str], Optional[int]]:
-    """Extract the sequence string and length from an entry if available."""
-    sequence_block = entry.get("sequence") or {}
-    value = sequence_block.get("value")
-    length = sequence_block.get("length") or entry.get("sequenceLength")
-    if value and not length:
-        length = len(value)
-    return value, length
-
-
-def build_uniref100_sequence(uniref100_id: str) -> UniRef100Sequence:
-    """Construct a UniRef100Sequence object for the provided cluster."""
-    representative, members = fetch_uniref100_cluster(uniref100_id)
-    sequence, length = _sequence_from_entry(representative)
-
-    if not sequence:
-        for member in members:
-            sequence, length = _sequence_from_entry(member)
-            if sequence:
-                break
-
-    if not sequence:
-        raise UniRefError(
-            f"UniRef100 cluster {uniref100_id} does not provide a sequence."
-        )
-
-    accessions: Sequence[str] = representative.get("accessions") or ()
-    cluster_member_count = 1 + len(members)
-
-    return UniRef100Sequence(
-        cluster_id=_normalize_cluster_id(uniref100_id, "UniRef100"),
-        sequence=sequence,
-        length=length,
-        accessions=tuple(accessions),
-        cluster_member_count=cluster_member_count,
-    )
-
-
 def collect_uniref90_cluster_info(uniref90_id: str) -> UniRef90ClusterInfo:
     """Gather UniRef100 sequence data for the provided UniRef90 cluster."""
     normalized_id = _normalize_cluster_id(uniref90_id, "UniRef90")
@@ -261,24 +211,45 @@ def collect_uniref90_cluster_info(uniref90_id: str) -> UniRef90ClusterInfo:
             f"UniRef90 cluster {normalized_id} contains no UniRef100 members."
         )
 
-    sequences = [
-        build_uniref100_sequence(candidate) for candidate in sorted(uniref100_candidates)
-    ]
+    #uniref100_candidate = [
+        #build_uniref100_sequence(candidate) for candidate in sorted(uniref100_candidates)
+    #]
 
     return UniRef90ClusterInfo(
-        cluster_id=normalized_id, uniref100_sequences=sequences
+        cluster_id=normalized_id, uniref100_ids=sorted(uniref100_candidates)
     )
 
 
+def gather_uniref90_clusters_parallel(
+    cluster_ids: Sequence[str], max_workers: int = 4
+) -> Tuple[List[UniRef90ClusterInfo], List[Tuple[str, str]]]:
+    clusters: List[UniRef90ClusterInfo] = []
+    errors: List[Tuple[str, str]] = []
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_map = {
+            executor.submit(collect_uniref90_cluster_info, cluster_id): cluster_id
+            for cluster_id in cluster_ids
+        }
+        for future in as_completed(future_map):
+            cluster_id = future_map[future]
+            try:
+                clusters.append(future.result())
+            except UniRefError as exc:
+                errors.append((cluster_id, str(exc)))
+    return clusters, errors
+
+
 def build_sampling_pool(
-    seed_uniref90_id: str,
+    seed_uniref90_id: str, max_workers: int = 4
 ) -> Tuple[str, List[UniRef90ClusterInfo]]:
     """Assemble sampling-ready data for the supplied UniRef90 accession."""
     uniref50_id = infer_uniref50_id(seed_uniref90_id)
-    uniref90_clusters = [
-        collect_uniref90_cluster_info(cluster_id)
-        for cluster_id in collect_uniref90_members(uniref50_id)
-    ]
+    uniref90_list = collect_uniref90_members(uniref50_id)
+    uniref90_clusters, errors = gather_uniref90_clusters_parallel(
+        uniref90_list, max_workers=max_workers
+    )
+    for cluster_id, msg in errors:
+        print(f"Warning: failed to load {cluster_id}: {msg}", file=sys.stderr)
     return uniref50_id, uniref90_clusters
 
 
@@ -299,69 +270,32 @@ def compute_sampling_records(
                 f"UniRef90 cluster {cluster.cluster_id} has no UniRef100 members."
             )
         sequence_weight = cluster_weight / cluster.size
-        for sequence in cluster.uniref100_sequences:
+        for u100 in cluster.uniref100_ids:
             records.append(
                 SamplingRecord(
                     uniref90_id=cluster.cluster_id,
                     uniref90_size=cluster.size,
-                    uniref100_id=sequence.cluster_id,
-                    sequence=sequence.sequence,
-                    length=sequence.length,
-                    uniref100_cluster_size=sequence.cluster_member_count,
+                    uniref100_id=u100,
                     probability=sequence_weight,
                 )
             )
-
     return records
 
 
-def _sequence_token_count(record: SamplingRecord) -> int:
-    """Return the token count for a sampled sequence (AA residues)."""
-    if record.length:
-        return record.length
-    return len(record.sequence)
-
-
-def sample_until_token_limit(
-    records: Sequence[SamplingRecord],
-    token_limit: int,
-    rng: random.Random,
-) -> Tuple[List[SamplingRecord], int]:
-    """Sample records until the cumulative token limit is reached."""
-    if token_limit <= 0:
-        raise UniRefError("--token-limit must be a positive integer.")
-    weights = [record.probability for record in records]
-    total_tokens = 0
-    sampled: List[SamplingRecord] = []
-
-    while total_tokens < token_limit:
-        record = rng.choices(records, weights=weights, k=1)[0]
-        tokens = _sequence_token_count(record)
-        if tokens <= 0:
-            raise UniRefError(
-                f"Sequence {record.uniref100_id} has non-positive token count."
-            )
-        sampled.append(record)
-        total_tokens += tokens
-
-    return sampled, total_tokens
-
-
-def write_fasta(records: Sequence[SamplingRecord], destination: Path) -> None:
-    """Write UniRef100 sequences to a FASTA file with probability metadata."""
+def write_uniref100_accession(
+    records: Sequence[SamplingRecord], destination: Path
+) -> None:
+    """Write UniRef100 accessions to a txt file with probability metadata."""
     destination.parent.mkdir(parents=True, exist_ok=True)
     with destination.open("w", encoding="ascii") as handle:
         for record in records:
             header = (
-                f">{record.uniref100_id} "
+                f"{record.uniref100_id} "
                 f"uniref90={record.uniref90_id} "
                 f"probability={record.probability:.10f} "
-                f"uniref90_size={record.uniref90_size} "
-                f"uniref100_size={record.uniref100_cluster_size}"
+                f"uniref90_size={record.uniref90_size}"
             )
             handle.write(header + "\n")
-            for line in textwrap.wrap(record.sequence, width=60):
-                handle.write(line + "\n")
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -391,31 +325,25 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Optional RNG seed used when sampling.",
     )
     parser.add_argument(
-        "--token-limit",
-        type=int,
-        default=0,
-        help=(
-            "Sample UniRef100 sequences until the cumulative residue count "
-            "reaches this limit. Incompatible with --sample-size."
-        ),
-    )
-    parser.add_argument(
-        "--fasta-out",
+        "--out-path",
         type=Path,
         default=None,
-        help="Optional path to write the UniRef100 sequences in FASTA format.",
+        help="Optional path to write sampled UniRef100 accessions.",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=4,
+        help="Number of worker threads",
     )
 
     args = parser.parse_args(argv)
     if args.sample_size is not None and args.sample_size < 0:
         parser.error("--sample-size must be non-negative.")
-    if args.token_limit is not None and args.token_limit < 0:
-        parser.error("--token-limit must be non-negative.")
-    if args.sample_size and args.token_limit:
-        parser.error("--sample-size and --token-limit are mutually exclusive.")
 
     try:
-        uniref50_id, clusters = build_sampling_pool(args.uniref90_id)
+        # Return Uniref90 clusters of the parent Uniref50 cluster
+        uniref50_id, clusters = build_sampling_pool(args.uniref90_id, args.workers)
         records = compute_sampling_records(clusters)
     except UniRefError as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -437,47 +365,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             f"{cluster.cluster_id}: {cluster.size} UniRef100 clusters "
             f"(cluster weight {cluster_weight:.6f})"
         )
-        for sequence in cluster.uniref100_sequences:
-            record = record_lookup[(cluster.cluster_id, sequence.cluster_id)]
-            accession_str = ", ".join(sequence.accessions) or "n/a"
-            length_str = str(sequence.length) if sequence.length else "unknown"
-            print(
-                f"  - {sequence.cluster_id} | length={length_str} | "
-                f"UniRef100 members={sequence.cluster_member_count} | "
-                f"probability={record.probability:.6f}"
-            )
-            if accession_str != "n/a":
-                print(f"    accessions: {accession_str}")
-            wrapped_sequence = textwrap.wrap(sequence.sequence, width=80)
-            for line in wrapped_sequence:
-                print(f"    {line}")
+        for uniref100_id in cluster.uniref100_ids:
+            record = record_lookup[(cluster.cluster_id, uniref100_id)]
+            print(f"  - {uniref100_id} | probability={record.probability:.6f}")
 
-    if args.fasta_out:
-        write_fasta(records, args.fasta_out)
-        print()
-        print(f"FASTA written to {args.fasta_out}")
-
-    sampled_records: List[SamplingRecord] = []
-    if args.token_limit:
-        rng = random.Random(args.seed)
-        sampled_records, used_tokens = sample_until_token_limit(
-            records, args.token_limit, rng
-        )
-        print()
-        print(
-            f"Sampled {len(sampled_records)} sequences to reach "
-            f"{used_tokens} tokens (limit {args.token_limit})."
-        )
-        for index, record in enumerate(sampled_records, 1):
-            print(
-                f"{index}. {record.uniref100_id} "
-                f"(UniRef90={record.uniref90_id}, tokens={_sequence_token_count(record)}, "
-                f"prob={record.probability:.6f})"
-            )
-    elif args.sample_size:
+    if args.sample_size:
         rng = random.Random(args.seed)
         weights = [record.probability for record in records]
         sampled_records = rng.choices(records, weights=weights, k=args.sample_size)
+        if args.out_path:
+            write_uniref100_accession(sampled_records, args.out_path)
         print()
         print(f"Sampled {args.sample_size} UniRef100 sequences:")
         for index, record in enumerate(sampled_records, 1):
