@@ -32,6 +32,7 @@ _SESSION.headers.update({"User-Agent": USER_AGENT})
 _session_local = threading.local()
 _cache_lock = threading.Lock()
 CACHE_FILE = Path.home() / ".poet_uniref_cache.json"
+MISSING_CLUSTERS_PATH = Path("missing_uniref_clusters.txt")
 
 _uniref50_members_cache: Dict[str, List[str]] = {}
 _uniref90_members_cache: Dict[str, List[str]] = {}
@@ -65,6 +66,16 @@ def _persist_cache() -> None:
 
 
 atexit.register(_persist_cache)
+
+
+def _log_missing_cluster(cluster_id: str, message: str) -> None:
+    line = f"{cluster_id}\t{message}\n"
+    with _cache_lock:
+        try:
+            with MISSING_CLUSTERS_PATH.open("a", encoding="utf-8") as handle:
+                handle.write(line)
+        except OSError:
+            pass
 
 
 def _thread_session() -> requests.Session:
@@ -291,6 +302,7 @@ def gather_uniref90_clusters_parallel(
                 clusters.append(future.result())
             except UniRefError as exc:
                 errors.append((cluster_id, str(exc)))
+                _log_missing_cluster(cluster_id, str(exc))
     return clusters, errors
 
 
