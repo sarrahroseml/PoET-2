@@ -414,7 +414,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         records = compute_sampling_records(clusters)
     except UniRefError as exc:
         print(f"Error: {exc}", file=sys.stderr)
-        return 1
+        
 
     total_sequences = len(records)
     print(f"UniRef50 parent cluster: {uniref50_id}")

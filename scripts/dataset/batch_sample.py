@@ -1,14 +1,15 @@
 from pathlib import Path
 import random
 
-from scripts.dataset.sample import (
+from sample import (
     build_sampling_pool,
     compute_sampling_records,
     write_uniref100_accession,
+    UniRefError
 )
 
-INPUT = Path("uniref90_ids.txt")
-OUTPUT_DIR = Path("out")
+INPUT = Path("/n/groups/marks/projects/viral_plm/models/PoET-2/data/u90_acc.txt")
+OUTPUT_DIR = Path("/n/groups/marks/projects/viral_plm/models/PoET-2/data/h_seqs")
 SAMPLE_SIZE = 100          # tweak per run
 WORKERS = 6
 SEED = 123
@@ -23,11 +24,16 @@ def main() -> None:
             seed = line.strip()
             if not seed or seed.startswith("#"):
                 continue
-            out_path = OUTPUT_DIR / f"{acc}.txt"
+            out_path = OUTPUT_DIR / f"{seed}.txt"
             if out_path.exists() and not OVERWRITE: 
                 print(f"{seed} already exists, skipping")
                 continue
-            uniref50_id, clusters = build_sampling_pool(seed, max_workers=WORKERS)
+            try:
+                uniref50_id, clusters = build_sampling_pool(seed, max_workers=WORKERS)
+            except UniRefError as exc: 
+                print(f"Warning: skipping {seed} ({exc})")
+                continue
+
             records = compute_sampling_records(clusters)
 
             sampled = rng.choices(
