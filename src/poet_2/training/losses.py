@@ -63,7 +63,7 @@ def masked_mlm_loss_sum(
     count of scored positions. ``F.cross_entropy(..., reduction="sum")`` returns 0.0 when
     every position is ignored, so an all-dropped batch gives ``(0, 0)`` (no NaN).
     """
-    lg = aa_logits(logits, n_aa)  # (B, L, n_aa)
+    lg = aa_logits(logits, n_aa).float()  # (B, L, n_aa); fp32 CE even for bf16 logits
     targets = targets.long()
     keep = was_masked.bool().clone()
     over = seq_mask_rate > rate_cap  # (B,) — drop whole sequences over the cap
@@ -88,7 +88,7 @@ def clm_loss_sum(
     Returns ``(loss_sum, n_scored)``. Only pad positions (``ignore_index``) are skipped;
     every real residue (including the trailing ``*``) is predicted.
     """
-    lg = aa_logits(logits, n_aa)[:, :-1]  # predict token t+1 from positions <= t
+    lg = aa_logits(logits, n_aa).float()[:, :-1]  # fp32 CE; predict token t+1 from <= t
     tgt = clm_targets.long()[:, 1:]
     loss_sum = F.cross_entropy(
         lg.transpose(1, 2), tgt, ignore_index=ignore_index, reduction="sum"

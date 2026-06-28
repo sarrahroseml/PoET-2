@@ -212,3 +212,7 @@ __marimo__/
 # pixi environments
 .pixi
 *.egg-info
+
+# Project-local
+poet2_train_spec.md
+.venv-train-cpu/
