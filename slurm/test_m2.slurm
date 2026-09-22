@@ -16,5 +16,5 @@ echo "host: $(hostname)"
 nvidia-smi || echo "WARNING: nvidia-smi failed -- no GPU visible; flash_attn import may fail"
 
 # M2: standalone runner (no pytest dependency). Prints PASS/FAIL per check, exits nonzero on fail.
-pixi run --no-lockfile-update python scripts/check_m2.py
+pixi run --frozen python scripts/check_m2.py
 

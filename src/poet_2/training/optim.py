@@ -15,8 +15,10 @@ import torch
 def build_optimizer(params, cfg) -> torch.optim.Optimizer:
     name = cfg.optimizer.lower()
     if name == "adamw":
+        fused = torch.cuda.is_available()
         return torch.optim.AdamW(
-            params, lr=cfg.peak_lr, betas=(0.9, 0.95), weight_decay=cfg.weight_decay
+            params, lr=cfg.peak_lr, betas=(0.9, 0.95), weight_decay=cfg.weight_decay,
+            fused=fused,
         )
     if name == "adafactor":
         try:

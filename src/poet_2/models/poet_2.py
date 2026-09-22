@@ -95,6 +95,24 @@ def tie_linear_weights(src_module: nn.Linear, target_module: nn.Linear):
     target_module.bias = src_module.bias
 
 
+def untie_decoders(model: "PoET2"):
+    """Give mlm_decoder and clm_decoder their own parameter copies, breaking ties with encoder.
+
+    Preserves within-module ties (e.g. cross-attention K/V sharing across layers).
+    """
+    encoder_param_ids = {id(p) for p in model.encoder.parameters()}
+
+    for decoder in (model.mlm_decoder, model.clm_decoder):
+        cloned: dict[int, nn.Parameter] = {}
+        for _, module in decoder.named_modules():
+            for param_name, param in list(module._parameters.items()):
+                if param is None or id(param) not in encoder_param_ids:
+                    continue
+                if id(param) not in cloned:
+                    cloned[id(param)] = nn.Parameter(param.data.clone())
+                module._parameters[param_name] = cloned[id(param)]
+
+
 def tie_cross_attn_kv_weights(
     src_module: TransformerDecoderLayer, target_module: TransformerDecoderLayer
 ):
@@ -695,13 +713,14 @@ class PoET2(nn.Module):
             or len(cross_attn_layers) > 0,
         )
         if ys_ref_values is not None:
+            blend = getattr(self, '_ref_blend', 0.5)
             if ys_refs is not None:
                 mask = ys_refs != -100
-                ys_h.x[mask] /= 2
-                ys_h.x[mask] += ys_ref_values / 2
+                ys_h.x[mask] *= (1 - blend)
+                ys_h.x[mask] += ys_ref_values * blend
             else:
-                ys_h.x /= 2
-                ys_h.x += ys_ref_values / 2
+                ys_h.x *= (1 - blend)
+                ys_h.x += ys_ref_values * blend
         if ys.device.type == "cpu":
             ys_h.make_to_paddedable()
         if B > 1 and memory_B == 1:

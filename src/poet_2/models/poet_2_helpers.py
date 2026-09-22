@@ -17,6 +17,8 @@ from poet_2.alphabets import Uniprot21, append_startstop
 from poet_2.models.modules.packed_sequence import PackedTensorSequences
 from poet_2.models.poet_2 import N_ATOMB, PoET2
 
+_SELF_PROMPT_MODE = "default"
+
 
 @contextmanager
 def default_dtype(dtype: torch.dtype):
@@ -44,6 +46,9 @@ def load_model(
         hparams = ckpt["hyper_parameters"]["model_spec"]["init_args"]
     with default_dtype(model_dtype), torch.device(device):
         model = PoET2(**hparams)
+    if ckpt.get("hyper_parameters", {}).get("_untied_decoders"):
+        from poet_2.models.poet_2 import untie_decoders
+        untie_decoders(model)
     model.load_state_dict(
         {k.removeprefix("model."): v for k, v in ckpt["state_dict"].items()}
     )
@@ -424,20 +429,18 @@ def score_sequences_given_memory(
 
         idx = alphabet.gap_token
         query_one_hot = F.one_hot(self_prompt, logits.size(-1)).to(logits.device)
-        logits = F.log_softmax(logits, dim=-1)
 
-        # this does not enforce consistency
-        log_p_match = logits[..., idx].unsqueeze(-1) # the log probability of emitting '-'
-        log_p_match_token = torch.log(query_one_hot) + log_p_match # emitting '-' means the token in the mask
-
-        logits = torch.logaddexp(logits, log_p_match_token)
-        logits[..., idx] = -np.inf # we've converted outputting '-' to the token, so this should be -inf
-
-        # this version enforces consitency
-        # is_match = (self_prompt != alphabet.mask_token).float().unsqueeze(-1)
-        # logits[..., idx] = -np.inf
-        # logits = torch.log_softmax(logits, dim=-1)
-        # logits = torch.logaddexp(torch.log(1-is_match) + logits, torch.log(is_match) + torch.log(query_one_hot))
+        if _SELF_PROMPT_MODE == "consistency":
+            is_match = (self_prompt != alphabet.mask_token).float().unsqueeze(-1)
+            logits[..., idx] = -np.inf
+            logits = torch.log_softmax(logits, dim=-1)
+            logits = torch.logaddexp(torch.log(1-is_match) + logits, torch.log(is_match) + torch.log(query_one_hot))
+        else:
+            logits = F.log_softmax(logits, dim=-1)
+            log_p_match = logits[..., idx].unsqueeze(-1)
+            log_p_match_token = torch.log(query_one_hot) + log_p_match
+            logits = torch.logaddexp(logits, log_p_match_token)
+            logits[..., idx] = -np.inf
     # fmt: on
     return -(
         F.cross_entropy(

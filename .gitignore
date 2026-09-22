@@ -1,5 +1,9 @@
 .vscode
-data/gitignore
+data/
+wandb/
+.claude/
+# SLURM job logs
+*.out
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

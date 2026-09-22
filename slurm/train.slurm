@@ -32,7 +32,7 @@ NGPU=${SLURM_GPUS_ON_NODE:-4}
 echo "host: $(hostname)  ngpu: ${NGPU}"
 nvidia-smi -L || true
 
-pixi run --no-lockfile-update torchrun --standalone --nproc_per_node="${NGPU}" \
+pixi run --frozen torchrun --standalone --nproc_per_node="${NGPU}" \
   -m poet_2.training.train \
   --data-dir "${DATA_DIR}" \
   --checkpoint data/gitignore/models/poet-2.ckpt \
@@ -44,13 +44,13 @@ pixi run --no-lockfile-update torchrun --standalone --nproc_per_node="${NGPU}" \
   --schedule cosine \
   --tokens-per-gpu 45056 \
   --grad-accum 2 \
-  --ddp-mode find_unused \
+  --ddp-mode static_graph \
   --save-every 1000 --log-every 10
 
 # --- M3 validation gate: overfit one batch on a SINGLE GPU first ---
 # Loss should fall toward ~0 within ~100 steps if training_forward + losses + optimizer
 # are wired correctly. Run interactively (1 GPU) before a full multi-GPU run:
 #
-#   pixi run --no-lockfile-update python -m poet_2.training.train \
+#   pixi run --frozen python -m poet_2.training.train \
 #     --data-dir "${DATA_DIR}" --overfit-one-batch --total-steps 100 \
 #     --tokens-per-gpu 8192 --log-every 5 --save-every 0

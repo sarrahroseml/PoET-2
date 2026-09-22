@@ -43,6 +43,7 @@ pyarrow = ">=20.0.0,<21"
 ipykernel = ">=6.29.5,<7"
 pyzstd = ">=0.16.2,<0.17"
 openprotein-python = "==0.7.0"
+wandb = ">=0.18,<1"
 poet_2 = { path = ".", editable = true }
 
 [tool.pixi.pypi-options]
@@ -50,7 +51,7 @@ index-strategy = "unsafe-best-match"
 extra-index-urls = ["https://download.pytorch.org/whl/cu118"]
 
 [tool.pixi.activation.env]
-TRITON_PTXAS_PATH = "$CONDA_PREFIX/lib/python3.10/site-packages/torch/bin/ptxas"
+TRITON_PTXAS_PATH = "/n/sw/helmod-rocky8/apps/Core/cuda/12.4.1-fasrc01/cuda/bin/ptxas"
 
 [tool.pixi.tasks]
 

@@ -14,7 +14,7 @@ from poet_2.training import losses
 from poet_2.training.data import (
     MASK_TOKEN,
     CollatorConfig,
-    MaterializedDataset,
+    PoET2Dataset,
     _noise_and_wrap,
     augment_and_pack,
     batch_by_token_budget,
@@ -131,14 +131,14 @@ def test_collated_loss_tensors_feed_total_loss():
     assert xs.grad is not None and torch.isfinite(xs.grad).all()
 
 
-# ----------------------------------------------- input-format reader (MaterializedDataset)
+# ----------------------------------------------- input-format reader (PoET2Dataset)
 
 
 def _write_fixture(d, families) -> str:
     """Reference: produce the expected input format. (Your real data-prep does this, with
     its own family weighting / context subsampling / shuffling.)"""
     pool_index, pool = {}, []
-    rec_ctx_ids, rec_ctx_off, rec_target = [], [0], []
+    sample_ctx_ids, sample_ctx_offsets, sample_targets = [], [0], []
     for fam in families:
         ids = []
         for s in fam:
@@ -149,16 +149,16 @@ def _write_fixture(d, families) -> str:
                 pool.append(r)
             ids.append(pool_index[key])
         target, ctx = ids[0], (ids[1:] or [ids[0]])  # held-out target = member 0
-        rec_target.append(target)
-        rec_ctx_ids.extend(ctx)
-        rec_ctx_off.append(len(rec_ctx_ids))
+        sample_targets.append(target)
+        sample_ctx_ids.extend(ctx)
+        sample_ctx_offsets.append(len(sample_ctx_ids))
     lengths = np.array([len(p) for p in pool], dtype=np.int64)
     np.save(f"{d}/pool_tokens.npy", np.concatenate(pool).astype(np.uint8))
     np.save(f"{d}/pool_offsets.npy", np.concatenate(([0], np.cumsum(lengths))).astype(np.int64))
-    np.save(f"{d}/recipe_target.npy", np.array(rec_target, dtype=np.int64))
-    np.save(f"{d}/recipe_ctx_ids.npy", np.array(rec_ctx_ids, dtype=np.int64))
-    np.save(f"{d}/recipe_ctx_offsets.npy", np.array(rec_ctx_off, dtype=np.int64))
-    json.dump({"n_pool": len(pool), "n_recipes": len(rec_target)}, open(f"{d}/meta.json", "w"))
+    np.save(f"{d}/sample_target.npy", np.array(sample_targets, dtype=np.int64))
+    np.save(f"{d}/sample_ctx_ids.npy", np.array(sample_ctx_ids, dtype=np.int64))
+    np.save(f"{d}/sample_ctx_offsets.npy", np.array(sample_ctx_offsets, dtype=np.int64))
+    json.dump({"n_pool": len(pool), "n_samples": len(sample_targets)}, open(f"{d}/meta.json", "w"))
     return str(d)
 
 
@@ -167,13 +167,13 @@ def _unique_keys(families):
 
 
 def test_reader_len_and_meta(tmp_path):
-    ds = MaterializedDataset(_write_fixture(tmp_path, FAMILIES))
+    ds = PoET2Dataset(_write_fixture(tmp_path, FAMILIES))
     assert len(ds) == len(FAMILIES)
     assert ds.meta["n_pool"] == len(_unique_keys(FAMILIES))
 
 
 def test_reader_getitem_token_count_and_clean_clm(tmp_path):
-    ds = MaterializedDataset(_write_fixture(tmp_path, FAMILIES))
+    ds = PoET2Dataset(_write_fixture(tmp_path, FAMILIES))
     for i in range(len(ds)):
         s = ds[i]
         assert len(s["ctx_inputs"]) >= 1
@@ -183,16 +183,16 @@ def test_reader_getitem_token_count_and_clean_clm(tmp_path):
 
 
 def test_reader_pool_roundtrip(tmp_path):
-    ds = MaterializedDataset(_write_fixture(tmp_path, FAMILIES))
+    ds = PoET2Dataset(_write_fixture(tmp_path, FAMILIES))
     keys = _unique_keys(FAMILIES)
     for pid in range(ds.pool_offsets.shape[0] - 1):
         assert ds._gather(pid).astype(np.uint8).tobytes() in keys
 
 
-def test_reader_sharding_partitions_recipes(tmp_path):
+def test_reader_sharding_partitions_samples(tmp_path):
     d = _write_fixture(tmp_path, FAMILIES)
-    r0 = MaterializedDataset(d, rank=0, world_size=2).indices
-    r1 = MaterializedDataset(d, rank=1, world_size=2).indices
+    r0 = PoET2Dataset(d, rank=0, world_size=2).indices
+    r1 = PoET2Dataset(d, rank=1, world_size=2).indices
     assert set(r0.tolist()) | set(r1.tolist()) == set(range(len(FAMILIES)))
     assert set(r0.tolist()) & set(r1.tolist()) == set()
 
@@ -200,18 +200,18 @@ def test_reader_sharding_partitions_recipes(tmp_path):
 def test_reader_masking_is_fresh_but_reproducible(tmp_path):
     d = _write_fixture(tmp_path, FAMILIES)
     # same (seed, index) -> identical masking
-    a, b = MaterializedDataset(d, seed=0)[1], MaterializedDataset(d, seed=0)[1]
+    a, b = PoET2Dataset(d, seed=0)[1], PoET2Dataset(d, seed=0)[1]
     assert np.array_equal(a["mlm_input"], b["mlm_input"])
     # different dataset seed -> different masking on the same frozen selection
-    other = MaterializedDataset(d, seed=999)
+    other = PoET2Dataset(d, seed=999)
     assert any(
-        not np.array_equal(MaterializedDataset(d, seed=0)[i]["mlm_input"], other[i]["mlm_input"])
+        not np.array_equal(PoET2Dataset(d, seed=0)[i]["mlm_input"], other[i]["mlm_input"])
         for i in range(len(other))
     )
 
 
 def test_reader_feeds_losses(tmp_path):
-    ds = MaterializedDataset(_write_fixture(tmp_path, FAMILIES))
+    ds = PoET2Dataset(_write_fixture(tmp_path, FAMILIES))
     b = collate_token_budget([ds[i] for i in range(len(ds))])
     V = 2 * losses.AA_VOCAB
     xs = torch.randn(*b["xs"].shape, V, requires_grad=True)
